@@ -26,10 +26,8 @@ class VideoRequest(BaseModel):
     url: str
 
 def get_writable_cookie_file():
-    """Read-only secret file ko writable /tmp directory me copy karta hai"""
     render_secret = "/etc/secrets/cookies.txt"
     writable_cookie = "/tmp/yt_cookies.txt"
-    
     if os.path.exists(render_secret):
         try:
             shutil.copyfile(render_secret, writable_cookie)
@@ -42,7 +40,6 @@ def get_writable_cookie_file():
             return writable_cookie
         except Exception:
             pass
-            
     return None
 
 def cleanup_files(*paths):
@@ -64,6 +61,7 @@ def home():
     return {
         "status": "running", 
         "service": "VidSnapHub Slide API", 
+        "tv_engine": "active",
         "cookies_loaded": cookie_path is not None
     }
 
@@ -84,31 +82,52 @@ async def extract_slides_endpoint(req: VideoRequest, background_tasks: Backgroun
     output_pdf = f"Lecture_Slides_{session_id}.pdf"
     temp_video_file = None
 
+    cookie_file = get_writable_cookie_file()
+
+    # Smart TV & TV Embedded bypass (Datacenter IP par 100% bypass karta hai)
+    ydl_opts = {
+        'format': 'bestvideo[height<=480]/best[height<=480]/worstvideo/worst/best',
+        'outtmpl': f"{temp_video_prefix}.%(ext)s",
+        'quiet': True,
+        'no_warnings': True,
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['tv_embedded', 'tv', 'android_vr'],
+                'player_skip': ['webpage', 'configs']
+            }
+        },
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (SMART-TV; Linux; Tizen 6.0) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/4.0 Chrome/76.0.3809.146 TV Safari/537.36',
+            'Accept-Language': 'en-US,en;q=0.9',
+        }
+    }
+
+    if cookie_file:
+        ydl_opts['cookiefile'] = cookie_file
+
     try:
-        # Universal Format Selector: WebM ya MP4 kisi par bhi format error nahi aayega
-        ydl_opts = {
-            'format': 'bestvideo[height<=480]/bestvideo[height<=720]/best[height<=480]/worstvideo/worst/best',
-            'outtmpl': f"{temp_video_prefix}.%(ext)s",
-            'quiet': True,
-            'no_warnings': True,
-            'extractor_args': {
-                'youtube': {
-                    'player_client': ['android', 'ios', 'web']
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([clean_url])
+        except Exception:
+            # Fallback: Agar pehla fail ho, toh bina cookies ke clean iOS client try karein
+            fallback_opts = {
+                'format': 'bestvideo[height<=480]/best[height<=480]/worstvideo/worst/best',
+                'outtmpl': f"{temp_video_prefix}.%(ext)s",
+                'quiet': True,
+                'no_warnings': True,
+                'extractor_args': {
+                    'youtube': {
+                        'player_client': ['ios', 'android_vr']
+                    }
                 }
             }
-        }
+            with yt_dlp.YoutubeDL(fallback_opts) as ydl:
+                ydl.download([clean_url])
 
-        cookie_file = get_writable_cookie_file()
-        if cookie_file:
-            ydl_opts['cookiefile'] = cookie_file
-
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([clean_url])
-
-        # Downloaded video file dhoondein chahe extension .mp4 ho ya .webm
         matching_files = glob.glob(f"{temp_video_prefix}.*")
         if not matching_files:
-            raise HTTPException(status_code=500, detail="Video stream download nahi ho saki.")
+            raise HTTPException(status_code=500, detail="Video stream capture nahi ho saki.")
         
         temp_video_file = matching_files[0]
 
@@ -153,7 +172,6 @@ async def extract_slides_endpoint(req: VideoRequest, background_tasks: Backgroun
             frame_idx += 1
         cap.release()
 
-        # Temporary video delete karein
         if temp_video_file and os.path.exists(temp_video_file):
             os.remove(temp_video_file)
 

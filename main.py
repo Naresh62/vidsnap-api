@@ -1,5 +1,6 @@
 import os
 import re
+import glob
 import uuid
 import shutil
 import cv2
@@ -46,6 +47,8 @@ def get_writable_cookie_file():
 
 def cleanup_files(*paths):
     for path in paths:
+        if not path:
+            continue
         if os.path.exists(path):
             if os.path.isdir(path):
                 shutil.rmtree(path, ignore_errors=True)
@@ -76,14 +79,16 @@ async def extract_slides_endpoint(req: VideoRequest, background_tasks: Backgroun
     clean_url = f"https://www.youtube.com/watch?v={video_id}"
     
     session_id = str(uuid.uuid4())[:8]
-    temp_video = f"video_{session_id}.mp4"
+    temp_video_prefix = f"video_{session_id}"
     slides_dir = f"slides_{session_id}"
     output_pdf = f"Lecture_Slides_{session_id}.pdf"
+    temp_video_file = None
 
     try:
+        # Universal Format Selector: WebM ya MP4 kisi par bhi format error nahi aayega
         ydl_opts = {
-            'format': 'bestvideo[height<=480][ext=mp4]/best[height<=480]/best',
-            'outtmpl': temp_video,
+            'format': 'bestvideo[height<=480]/bestvideo[height<=720]/best[height<=480]/worstvideo/worst/best',
+            'outtmpl': f"{temp_video_prefix}.%(ext)s",
             'quiet': True,
             'no_warnings': True,
             'extractor_args': {
@@ -93,7 +98,6 @@ async def extract_slides_endpoint(req: VideoRequest, background_tasks: Backgroun
             }
         }
 
-        # Writable cookie file pass karein taaki [Errno 30] na aaye
         cookie_file = get_writable_cookie_file()
         if cookie_file:
             ydl_opts['cookiefile'] = cookie_file
@@ -101,12 +105,16 @@ async def extract_slides_endpoint(req: VideoRequest, background_tasks: Backgroun
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([clean_url])
 
-        if not os.path.exists(temp_video):
+        # Downloaded video file dhoondein chahe extension .mp4 ho ya .webm
+        matching_files = glob.glob(f"{temp_video_prefix}.*")
+        if not matching_files:
             raise HTTPException(status_code=500, detail="Video stream download nahi ho saki.")
+        
+        temp_video_file = matching_files[0]
 
         # OpenCV Frame Capture
         os.makedirs(slides_dir, exist_ok=True)
-        cap = cv2.VideoCapture(temp_video)
+        cap = cv2.VideoCapture(temp_video_file)
         fps = cap.get(cv2.CAP_PROP_FPS) or 30
         interval = int(fps * 1.5)
 
@@ -145,8 +153,9 @@ async def extract_slides_endpoint(req: VideoRequest, background_tasks: Backgroun
             frame_idx += 1
         cap.release()
 
-        if os.path.exists(temp_video):
-            os.remove(temp_video)
+        # Temporary video delete karein
+        if temp_video_file and os.path.exists(temp_video_file):
+            os.remove(temp_video_file)
 
         if not saved_slides:
             cleanup_files(slides_dir)
@@ -166,5 +175,7 @@ async def extract_slides_endpoint(req: VideoRequest, background_tasks: Backgroun
         )
 
     except Exception as e:
-        cleanup_files(temp_video, slides_dir, output_pdf)
+        for f in glob.glob(f"{temp_video_prefix}.*"):
+            cleanup_files(f)
+        cleanup_files(slides_dir, output_pdf)
         raise HTTPException(status_code=500, detail=str(e))

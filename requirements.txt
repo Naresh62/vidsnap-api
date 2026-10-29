@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+yt-dlp
+opencv-python-headless
+numpy
+pillow
+img2pdf

@@ -13,7 +13,6 @@ from pydantic import BaseModel
 
 app = FastAPI(title="VidSnapHub Slide Extractor API")
 
-# Hostinger domain ke liye CORS allow karein
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -31,20 +30,24 @@ def cleanup_files(*paths):
             if os.path.isdir(path):
                 shutil.rmtree(path, ignore_errors=True)
             else:
-                os.remove(path)
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
 
 @app.get("/")
 def home():
-    return {"status": "running", "service": "VidSnapHub Slide API"}
+    # Check if cookies are detected on Render
+    cookie_found = os.path.exists("/etc/secrets/cookies.txt") or os.path.exists("cookies.txt")
+    return {"status": "running", "service": "VidSnapHub Slide API", "cookies_loaded": cookie_found}
 
 @app.post("/extract")
 async def extract_slides_endpoint(req: VideoRequest, background_tasks: BackgroundTasks):
     url = req.url.strip()
     
-    # 1. Clean Video ID check
     match = re.search(r'(?:v=|\/|embed\/|shorts\/)([0-9A-Za-z_-]{11})', url)
     if not match:
-        raise HTTPException(status_code=400, detail="Invalid YouTube URL")
+        raise HTTPException(status_code=400, detail="Invalid YouTube URL format.")
     
     video_id = match.group(1)
     clean_url = f"https://www.youtube.com/watch?v={video_id}"
@@ -55,7 +58,6 @@ async def extract_slides_endpoint(req: VideoRequest, background_tasks: Backgroun
     output_pdf = f"Lecture_Slides_{session_id}.pdf"
 
     try:
-        # 2. Download Video (480p taaki cloud server par ram kam use ho aur speed tez rahe)
         ydl_opts = {
             'format': 'bestvideo[height<=480][ext=mp4]/best[height<=480]/best',
             'outtmpl': temp_video,
@@ -63,17 +65,24 @@ async def extract_slides_endpoint(req: VideoRequest, background_tasks: Backgroun
             'no_warnings': True,
             'extractor_args': {
                 'youtube': {
-                    'player_client': ['android', 'ios']
+                    'player_client': ['android', 'ios', 'web']
                 }
             }
         }
+
+        # Render secret file check (/etc/secrets/cookies.txt) or local cookies.txt
+        if os.path.exists("/etc/secrets/cookies.txt"):
+            ydl_opts['cookiefile'] = "/etc/secrets/cookies.txt"
+        elif os.path.exists("cookies.txt"):
+            ydl_opts['cookiefile'] = "cookies.txt"
+
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([clean_url])
 
         if not os.path.exists(temp_video):
-            raise HTTPException(status_code=500, detail="Video stream download failed.")
+            raise HTTPException(status_code=500, detail="Video stream download nahi ho saki.")
 
-        # 3. OpenCV Slide Extraction
+        # OpenCV Frame Capture
         os.makedirs(slides_dir, exist_ok=True)
         cap = cv2.VideoCapture(temp_video)
         fps = cap.get(cv2.CAP_PROP_FPS) or 30
@@ -104,7 +113,6 @@ async def extract_slides_endpoint(req: VideoRequest, background_tasks: Backgroun
                     _, thresh = cv2.threshold(diff, 25, 255, cv2.THRESH_BINARY)
                     change = np.count_nonzero(thresh) / (gray.shape[0] * gray.shape[1])
 
-                    # 18% change hone par new slide
                     if change > 0.18:
                         slide_num += 1
                         path = f"{slides_dir}/slide_{slide_num:03d}.jpg"
@@ -115,28 +123,24 @@ async def extract_slides_endpoint(req: VideoRequest, background_tasks: Backgroun
             frame_idx += 1
         cap.release()
 
-        # Delete temp video immediately to save cloud memory
         if os.path.exists(temp_video):
             os.remove(temp_video)
 
         if not saved_slides:
             cleanup_files(slides_dir)
-            raise HTTPException(status_code=400, detail="Koi distinct slide detect nahi ho saki.")
+            raise HTTPException(status_code=400, detail="Koi distinct slide detect nahi hui.")
 
-        # 4. Generate PDF
+        # PDF Compilation
         with open(output_pdf, "wb") as f:
             f.write(img2pdf.convert(saved_slides))
 
-        # Cleanup slides folder
         cleanup_files(slides_dir)
-
-        # PDF download hote hi background me delete ho jayegi
         background_tasks.add_task(cleanup_files, output_pdf)
 
         return FileResponse(
             output_pdf, 
             media_type='application/pdf', 
-            filename=f"Lecture_Notes_{video_id}.pdf"
+            filename=f"Lecture_Slides_{video_id}.pdf"
         )
 
     except Exception as e:

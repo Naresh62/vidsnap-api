@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import tempfile
+import subprocess
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
@@ -161,7 +162,27 @@ def enforce_download_limit(progress):
 
 
 def download_video(clean_url, workdir, cookie_file):
+    node_path = shutil.which("node")
+    if not node_path:
+        raise HTTPException(
+            status_code=503,
+            detail="Server par Node.js missing hai. Node 22+ configure karke redeploy karein.",
+        )
+    try:
+        node_version = subprocess.run(
+            [node_path, "--version"], check=True, capture_output=True,
+            text=True, timeout=10,
+        ).stdout.strip()
+        if int(node_version.lstrip("v").split(".")[0]) < 22:
+            raise ValueError("Node 22+ required")
+    except (subprocess.SubprocessError, ValueError, OSError):
+        raise HTTPException(
+            status_code=503,
+            detail="Server par working Node.js 22+ required hai.",
+        )
+    logger.info("YouTube JS runtime: Node %s", node_version)
     options = {
+        "js_runtimes": {"node": {"path": node_path}},
         "format": "bestvideo[height<=720]/best[height<=720]",
         "outtmpl": str(workdir / "video.%(ext)s"),
         "noplaylist": True,
@@ -398,7 +419,19 @@ def extract_slides_endpoint(
 
         message = str(error).lower()
 
-        if "not a bot" in message or "sign in" in message:
+        status_code = 502
+        if "429" in message or "too many requests" in message:
+            status_code = 503
+            detail = (
+                "YouTube ne server requests rate-limit ki hain (429). "
+                "Abhi repeated retry na karein; kuch samay baad test karein."
+            )
+        elif "requested format is not available" in message:
+            detail = (
+                "Downloadable video format nahi mila. Server logs mein "
+                "JavaScript challenge/EJS aur access warnings check karein."
+            )
+        elif "not a bot" in message or "sign in" in message:
             detail = (
                 "YouTube ne server request par sign-in verification "
                 "maangi hai. Server cookies missing, expired ya "
@@ -413,7 +446,7 @@ def extract_slides_endpoint(
             )
 
         raise HTTPException(
-            status_code=502,
+            status_code=status_code,
             detail=detail,
         )
 

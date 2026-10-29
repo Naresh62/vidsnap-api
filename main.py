@@ -24,6 +24,26 @@ app.add_middleware(
 class VideoRequest(BaseModel):
     url: str
 
+def get_writable_cookie_file():
+    """Read-only secret file ko writable /tmp directory me copy karta hai"""
+    render_secret = "/etc/secrets/cookies.txt"
+    writable_cookie = "/tmp/yt_cookies.txt"
+    
+    if os.path.exists(render_secret):
+        try:
+            shutil.copyfile(render_secret, writable_cookie)
+            return writable_cookie
+        except Exception:
+            pass
+    elif os.path.exists("cookies.txt"):
+        try:
+            shutil.copyfile("cookies.txt", writable_cookie)
+            return writable_cookie
+        except Exception:
+            pass
+            
+    return None
+
 def cleanup_files(*paths):
     for path in paths:
         if os.path.exists(path):
@@ -37,9 +57,12 @@ def cleanup_files(*paths):
 
 @app.get("/")
 def home():
-    # Check if cookies are detected on Render
-    cookie_found = os.path.exists("/etc/secrets/cookies.txt") or os.path.exists("cookies.txt")
-    return {"status": "running", "service": "VidSnapHub Slide API", "cookies_loaded": cookie_found}
+    cookie_path = get_writable_cookie_file()
+    return {
+        "status": "running", 
+        "service": "VidSnapHub Slide API", 
+        "cookies_loaded": cookie_path is not None
+    }
 
 @app.post("/extract")
 async def extract_slides_endpoint(req: VideoRequest, background_tasks: BackgroundTasks):
@@ -70,11 +93,10 @@ async def extract_slides_endpoint(req: VideoRequest, background_tasks: Backgroun
             }
         }
 
-        # Render secret file check (/etc/secrets/cookies.txt) or local cookies.txt
-        if os.path.exists("/etc/secrets/cookies.txt"):
-            ydl_opts['cookiefile'] = "/etc/secrets/cookies.txt"
-        elif os.path.exists("cookies.txt"):
-            ydl_opts['cookiefile'] = "cookies.txt"
+        # Writable cookie file pass karein taaki [Errno 30] na aaye
+        cookie_file = get_writable_cookie_file()
+        if cookie_file:
+            ydl_opts['cookiefile'] = cookie_file
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([clean_url])

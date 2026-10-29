@@ -1,6 +1,6 @@
 fastapi
-uvicorn
-yt-dlp
+uvicorn[standard]
+yt-dlp[default]
 opencv-python-headless
 numpy
 pillow
